@@ -1,0 +1,360 @@
+import argparse
+import logging
+import os
+import pandas as pd
+import time
+from datetime import datetime, timedelta
+from pathlib import Path
+
+from pandas_gbq import to_gbq
+from selenium import webdriver
+from selenium.common.exceptions import TimeoutException, NoSuchElementException
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.common.by import By
+
+
+# Set up logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('scraper.log'),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
+
+
+def init_driver(local_download_path):
+    os.makedirs(local_download_path, exist_ok=True)
+    logger.info("Initializing Chrome driver...")
+
+    chrome_options = Options()
+    chrome_options.add_argument("--headless=new")
+    chrome_options.add_argument("--no-sandbox")
+    chrome_options.add_argument("--disable-dev-shm-usage")
+    chrome_options.add_argument("--remote-debugging-port=9222")
+    chrome_options.add_argument('--dns-prefetch-disable')
+    chrome_options.add_argument('--disable-gpu')
+    chrome_options.add_argument('--enable-cdp-events')
+    chrome_options.add_argument('--window-size=1920,1080')
+
+    prefs = {
+        "download.default_directory": str(Path(local_download_path).absolute()),
+        "download.prompt_for_download": False,
+        "download.directory_upgrade": True,
+        "safebrowsing.enabled": True
+    }
+    chrome_options.add_experimental_option("prefs", prefs)
+
+    service = Service()
+    driver = webdriver.Chrome(service=service, options=chrome_options)
+    driver.execute_cdp_cmd("Page.setDownloadBehavior", {
+        "behavior": "allow",
+        "downloadPath": str(Path(local_download_path).absolute())
+    })
+
+    logger.info("Chrome driver initialized successfully")
+    return driver
+
+
+def load_page(driver, wait, base_url, election_name):
+    """Navigate to the base URL and select the election — used at start and between iterations."""
+    logger.info(f"Loading page and selecting election: {election_name}")
+    driver.get(base_url)
+    time.sleep(3)
+
+    # Find election dropdown by formcontrolname
+    election_dropdown = wait.until(
+        EC.element_to_be_clickable((By.CSS_SELECTOR, "mat-select[formcontrolname='selectElection']"))
+    )
+    election_dropdown.click()
+    time.sleep(1)
+
+    option_xpath = f"//mat-option//span[contains(text(), '{election_name}')]"
+    election_option = wait.until(EC.element_to_be_clickable((By.XPATH, option_xpath)))
+    election_option.click()
+    logger.info(f"Election selected: {election_name}")
+    time.sleep(1.5)
+
+
+def get_available_dates(driver, wait):
+    """Scrape all available date options from the date dropdown and return as a list."""
+    logger.info("Reading available dates from dropdown...")
+
+    date_dropdown = None
+    try:
+        date_dropdown = wait.until(
+            EC.element_to_be_clickable((By.CSS_SELECTOR, "mat-select[formcontrolname='VotingByDate']"))
+        )
+    except TimeoutException:
+        date_dropdown = wait.until(
+            EC.element_to_be_clickable((By.CSS_SELECTOR, "mat-select[placeholder='Select Early Voting Date']"))
+        )
+
+    driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", date_dropdown)
+    time.sleep(0.5)
+    date_dropdown.click()
+    time.sleep(1.5)
+
+    wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "div.cdk-overlay-pane")))
+
+    all_options = driver.find_elements(By.CSS_SELECTOR, "mat-option")
+
+    # Collect all non-placeholder option texts
+    dates = [
+        opt.text.strip()
+        for opt in all_options
+        if opt.text.strip() and opt.text.strip().lower() != "select early voting date"
+    ]
+
+    logger.info(f"Found {len(dates)} available dates: {dates}")
+
+    # Close the dropdown without selecting anything by pressing Escape
+    driver.find_element(By.TAG_NAME, "body").send_keys("\ue00c")
+    time.sleep(0.5)
+
+    return dates
+
+
+def select_date(driver, wait, target_date):
+    """Select a specific date from the date dropdown."""
+    logger.info(f"Selecting date: {target_date}")
+
+    date_dropdown = None
+    try:
+        date_dropdown = wait.until(
+            EC.element_to_be_clickable((By.CSS_SELECTOR, "mat-select[formcontrolname='VotingByDate']"))
+        )
+    except TimeoutException:
+        date_dropdown = wait.until(
+            EC.element_to_be_clickable((By.CSS_SELECTOR, "mat-select[placeholder='Select Early Voting Date']"))
+        )
+
+    driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", date_dropdown)
+    time.sleep(0.5)
+    date_dropdown.click()
+    time.sleep(1.5)
+
+    wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "div.cdk-overlay-pane")))
+
+    option_xpath = f"//mat-option//span[contains(text(), '{target_date}')]"
+    date_option = wait.until(EC.element_to_be_clickable((By.XPATH, option_xpath)))
+    driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", date_option)
+    time.sleep(0.3)
+    date_option.click()
+    logger.info(f"Date selected: {target_date}")
+    time.sleep(1.5)
+
+
+def click_submit(driver, wait):
+    """Click the Submit button."""
+    logger.info("Clicking Submit button...")
+
+    submit_button = None
+    try:
+        submit_button = wait.until(EC.element_to_be_clickable((By.ID, 'btnPlaceByCounty')))
+    except TimeoutException:
+        try:
+            submit_button = wait.until(
+                EC.element_to_be_clickable((By.XPATH, "//button[contains(text(), 'Submit')]"))
+            )
+        except TimeoutException:
+            submit_button = wait.until(
+                EC.element_to_be_clickable((By.CSS_SELECTOR, "button.mat-mdc-raised-button"))
+            )
+
+    driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", submit_button)
+    time.sleep(0.5)
+
+    try:
+        submit_button.click()
+    except Exception:
+        driver.execute_script("arguments[0].click();", submit_button)
+
+    logger.info("Submit button clicked")
+    time.sleep(3)
+
+
+def download_csv(driver, wait, csv_dl_dir, date_label):
+    """Click CSV Download and wait for the file, then return the file path."""
+    logger.info("Looking for CSV Download link...")
+
+    csv_link = None
+    try:
+        csv_link = wait.until(
+            EC.element_to_be_clickable((By.XPATH, "//a[contains(@onclick, 'downloadReport')]"))
+        )
+    except TimeoutException:
+        csv_link = wait.until(
+            EC.element_to_be_clickable((By.XPATH, "//a[contains(text(), 'CSV Download')]"))
+        )
+
+    existing_csvs = {f for f in os.listdir(csv_dl_dir) if f.endswith('.csv')}
+    logger.info(f"CSV Download link found, clicking for date: {date_label}")
+    csv_link.click()
+
+    max_wait = 60
+    for _ in range(max_wait):
+        current_csvs = {f for f in os.listdir(csv_dl_dir) if f.endswith('.csv')}
+        new_files = current_csvs - existing_csvs
+        if new_files:
+            newest = max(
+                [os.path.join(csv_dl_dir, f) for f in new_files],
+                key=os.path.getctime
+            )
+            logger.info(f"Download complete: {os.path.basename(newest)}")
+            return newest
+        time.sleep(1)
+
+    raise TimeoutException(f"CSV did not download within {max_wait} seconds for date: {date_label}")
+
+
+def scrape_all_dates(election_name, csv_dl_dir, base_url):
+    """
+    Main scraping function. Iterates through all available dates for an election,
+    downloads the CSV for each, and returns a single concatenated DataFrame.
+    """
+    logger.info("=" * 70)
+    logger.info(f"Starting full scrape for election: {election_name}")
+    logger.info("=" * 70)
+
+    # Clear download directory
+    for f in os.listdir(csv_dl_dir):
+        fpath = os.path.join(csv_dl_dir, f)
+        if os.path.isfile(fpath):
+            os.remove(fpath)
+
+    driver = init_driver(local_download_path=csv_dl_dir)
+    wait = WebDriverWait(driver, 20)
+
+    try:
+        # Step 1: Load page, select election, and read the available dates
+        load_page(driver, wait, base_url, election_name)
+        available_dates = get_available_dates(driver, wait)
+
+        if not available_dates:
+            raise Exception("No dates found in the date dropdown.")
+
+        # Step 2: Iterate through each date
+        all_dfs = []
+        for i, date in enumerate(available_dates, start=1):
+            logger.info(f"--- Processing date {i}/{len(available_dates)}: {date} ---")
+
+            try:
+                # Return to base page and re-select election on every iteration
+                # to get back to a clean state with the date dropdown available
+                load_page(driver, wait, base_url, election_name)
+                select_date(driver, wait, date)
+                click_submit(driver, wait)
+                csv_path = download_csv(driver, wait, csv_dl_dir, date)
+
+                df = pd.read_csv(csv_path)
+                df['report_date'] = date
+                all_dfs.append(df)
+                logger.info(f"Appended {len(df)} rows for date: {date}")
+
+                # Remove the downloaded file to keep the folder clean
+                os.remove(csv_path)
+
+            except Exception as e:
+                logger.error(f"Failed to process date {date}: {str(e)}")
+                try:
+                    driver.save_screenshot(f"error_{date.replace('/', '-')}.png")
+                except:
+                    pass
+                # Continue to the next date rather than aborting the whole run
+                continue
+
+        if not all_dfs:
+            raise Exception("No data was successfully downloaded for any date.")
+
+        final_df = pd.concat(all_dfs, axis=0, ignore_index=True)
+        logger.info("=" * 70)
+        logger.info(f"Scraping complete. Total rows: {len(final_df)}, Dates: {len(all_dfs)}/{len(available_dates)}")
+        logger.info("=" * 70)
+        return final_df
+
+    finally:
+        driver.quit()
+        logger.debug("Browser closed")
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(
+        description="Texas Election Early Voting Scraper — All Dates",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter
+    )
+    parser.add_argument('--election', type=str, default='2026 SPECIAL RUNOFF ELECTION CONGRESSIONAL DISTRICT 18')
+    parser.add_argument('--output-dir', type=str, default='downloaded_files')
+    parser.add_argument('--output-csv', type=str, default='all_dates_ev_turnout.csv',
+                        help="Filename for the final concatenated CSV output")
+    parser.add_argument('--log-level', type=str, default='INFO',
+                        choices=['DEBUG', 'INFO', 'WARNING', 'ERROR'])
+    parser.add_argument('--upload-to-gbq', action='store_true',
+                        help="Upload results to Google BigQuery")
+    parser.add_argument('--gbq-project-id', type=str, default='demstxsp',
+                        help="Google BigQuery project ID")
+    parser.add_argument('--gbq-dataset', type=str, default='evav_processing_2026',
+                        help="Google BigQuery dataset name")
+    parser.add_argument('--gbq-table', type=str, default=None,
+                        help="Google BigQuery table name (auto-generated from election if not specified)")
+    args = parser.parse_args()
+
+    logger.setLevel(getattr(logging, args.log_level))
+
+    BASE_URL = "https://goelect.txelections.civixapps.com/ivis-evr-ui/evr"
+
+    os.makedirs(args.output_dir, exist_ok=True)
+
+    final_df = scrape_all_dates(
+        election_name=args.election,
+        csv_dl_dir=args.output_dir,
+        base_url=BASE_URL
+    )
+
+    output_path = os.path.join(args.output_dir, args.output_csv)
+    final_df.to_csv(output_path, index=False)
+    logger.info(f"Final dataset saved to: {output_path}")
+
+    print("\n" + "=" * 70)
+    print(f"Shape: {final_df.shape[0]} rows × {final_df.shape[1]} columns")
+    print(f"Dates collected: {final_df['report_date'].nunique()}")
+    print(f"\nFirst few rows:\n{final_df.head().to_string()}")
+    print("=" * 70)
+
+    # Upload to BigQuery if requested
+    if args.upload_to_gbq:
+        logger.info("\n" + "=" * 70)
+        logger.info("Uploading to Google BigQuery...")
+        
+        # Auto-generate table name from election if not specified
+        if args.gbq_table is None:
+            # Convert election name to valid table name
+            # Example: "2026 MARCH 3 PRIMARY ELECTION" -> "20260303_primary_election"
+            table_name = args.election.lower()
+            table_name = table_name.replace(" ", "_")
+            # Remove invalid characters for BigQuery table names
+            table_name = ''.join(c if c.isalnum() or c == '_' else '_' for c in table_name)
+            args.gbq_table = table_name
+        
+        full_table_name = f"{args.gbq_dataset}.{args.gbq_table}"
+        logger.info(f"Target table: {args.gbq_project_id}.{full_table_name}")
+        logger.info(f"Preview of data being uploaded:\n{final_df.head()}")
+        
+        try:
+            to_gbq(
+                final_df,
+                full_table_name,
+                project_id=args.gbq_project_id,
+                if_exists='replace'
+            )
+            logger.info(f"Successfully uploaded {len(final_df)} rows to BigQuery!")
+            logger.info("=" * 70)
+        except Exception as e:
+            logger.error(f"Failed to upload to BigQuery: {str(e)}")
+            logger.error("Data has been saved locally to CSV")
+            logger.error("=" * 70)
