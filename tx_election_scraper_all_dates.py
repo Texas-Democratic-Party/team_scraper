@@ -82,7 +82,7 @@ def load_page(driver, wait, base_url, election_name):
 
 
 def get_available_dates(driver, wait):
-    """Scrape all available date options from the date dropdown and return as a list."""
+    """Scrape all available date options from the date dropdown and return as a list, filtering out future dates."""
     logger.info("Reading available dates from dropdown...")
 
     date_dropdown = None
@@ -111,13 +111,31 @@ def get_available_dates(driver, wait):
         if opt.text.strip() and opt.text.strip().lower() != "select early voting date"
     ]
 
-    logger.info(f"Found {len(dates)} available dates: {dates}")
+    # Filter out future dates (only include dates up to yesterday)
+    today = datetime.now().date()
+    yesterday = today - timedelta(days=1)
+    
+    filtered_dates = []
+    for date_str in dates:
+        try:
+            # Parse the date string (format: MM/DD/YYYY)
+            date_obj = datetime.strptime(date_str, '%m/%d/%Y').date()
+            if date_obj <= yesterday:
+                filtered_dates.append(date_str)
+            else:
+                logger.debug(f"Skipping future date: {date_str}")
+        except ValueError:
+            logger.warning(f"Could not parse date: {date_str}, skipping")
+            continue
+
+    logger.info(f"Found {len(dates)} total dates, {len(filtered_dates)} dates up to yesterday ({yesterday.strftime('%m/%d/%Y')})")
+    logger.info(f"Dates to process: {filtered_dates}")
 
     # Close the dropdown without selecting anything by pressing Escape
     driver.find_element(By.TAG_NAME, "body").send_keys("\ue00c")
     time.sleep(0.5)
 
-    return dates
+    return filtered_dates
 
 
 def select_date(driver, wait, target_date):
@@ -180,22 +198,39 @@ def click_submit(driver, wait):
 
 
 def download_csv(driver, wait, csv_dl_dir, date_label):
-    """Click CSV Download and wait for the file, then return the file path."""
-    logger.info("Looking for CSV Download link...")
+    """Click 'Generate Statewide Report' button and wait for the file, then return the file path."""
+    logger.info("Looking for 'Generate Statewide Report' button...")
 
-    csv_link = None
+    report_button = None
     try:
-        csv_link = wait.until(
-            EC.element_to_be_clickable((By.XPATH, "//a[contains(@onclick, 'downloadReport')]"))
+        # Strategy 1: Find by the mdc-button__label text
+        report_button = wait.until(
+            EC.element_to_be_clickable((By.XPATH, "//span[@class='mdc-button__label' and contains(text(), 'Generate Statewide Report')]"))
         )
     except TimeoutException:
-        csv_link = wait.until(
-            EC.element_to_be_clickable((By.XPATH, "//a[contains(text(), 'CSV Download')]"))
-        )
+        # Strategy 2: Find any button containing the text
+        try:
+            report_button = wait.until(
+                EC.element_to_be_clickable((By.XPATH, "//button[contains(., 'Generate Statewide Report')]"))
+            )
+        except TimeoutException:
+            # Strategy 3: Find by button with mdc-button class containing the text
+            report_button = wait.until(
+                EC.element_to_be_clickable((By.XPATH, "//button[contains(@class, 'mdc-button')]//span[contains(text(), 'Generate Statewide Report')]"))
+            )
 
     existing_csvs = {f for f in os.listdir(csv_dl_dir) if f.endswith('.csv')}
-    logger.info(f"CSV Download link found, clicking for date: {date_label}")
-    csv_link.click()
+    logger.info(f"'Generate Statewide Report' button found, clicking for date: {date_label}")
+    
+    # Scroll into view and click
+    driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", report_button)
+    time.sleep(0.5)
+    
+    try:
+        report_button.click()
+    except Exception:
+        # Try JavaScript click if regular click fails
+        driver.execute_script("arguments[0].click();", report_button)
 
     max_wait = 60
     for _ in range(max_wait):
@@ -213,13 +248,21 @@ def download_csv(driver, wait, csv_dl_dir, date_label):
     raise TimeoutException(f"CSV did not download within {max_wait} seconds for date: {date_label}")
 
 
-def scrape_all_dates(election_name, csv_dl_dir, base_url):
+def scrape_all_dates(election_name, csv_dl_dir, base_url, primary_party=None):
     """
     Main scraping function. Iterates through all available dates for an election,
     downloads the CSV for each, and returns a single concatenated DataFrame.
+    
+    Args:
+        election_name: Name of the election to scrape
+        csv_dl_dir: Directory for temporary CSV downloads
+        base_url: Base URL of the election website
+        primary_party: Optional party designation (e.g., 'D' or 'R') to add as ballot_party column
     """
     logger.info("=" * 70)
     logger.info(f"Starting full scrape for election: {election_name}")
+    if primary_party:
+        logger.info(f"Primary party: {primary_party}")
     logger.info("=" * 70)
 
     # Clear download directory
@@ -237,7 +280,7 @@ def scrape_all_dates(election_name, csv_dl_dir, base_url):
         available_dates = get_available_dates(driver, wait)
 
         if not available_dates:
-            raise Exception("No dates found in the date dropdown.")
+            raise Exception("No dates found in the date dropdown (or all dates are in the future).")
 
         # Step 2: Iterate through each date
         all_dfs = []
@@ -253,7 +296,20 @@ def scrape_all_dates(election_name, csv_dl_dir, base_url):
                 csv_path = download_csv(driver, wait, csv_dl_dir, date)
 
                 df = pd.read_csv(csv_path)
+                
+                # Rename id_voter to sos_id
+                if 'id_voter' in df.columns:
+                    df.rename(columns={'id_voter': 'sos_id'}, inplace=True)
+                    logger.debug("Renamed column 'id_voter' to 'sos_id'")
+                
+                # Add report_date column
                 df['report_date'] = date
+                
+                # Add ballot_party column if primary_party is specified
+                if primary_party:
+                    df['ballot_party'] = primary_party
+                    logger.debug(f"Added column 'ballot_party' with value '{primary_party}'")
+                
                 all_dfs.append(df)
                 logger.info(f"Appended {len(df)} rows for date: {date}")
 
@@ -294,6 +350,8 @@ if __name__ == "__main__":
                         help="Filename for the final concatenated CSV output")
     parser.add_argument('--log-level', type=str, default='INFO',
                         choices=['DEBUG', 'INFO', 'WARNING', 'ERROR'])
+    parser.add_argument('--primary', type=str, default=None,
+                        help="Primary ballot party (e.g., 'D' or 'R'). If provided, adds 'ballot_party' column to dataframe")
     parser.add_argument('--upload-to-gbq', action='store_true',
                         help="Upload results to Google BigQuery")
     parser.add_argument('--gbq-project-id', type=str, default='demstxsp',
@@ -313,7 +371,8 @@ if __name__ == "__main__":
     final_df = scrape_all_dates(
         election_name=args.election,
         csv_dl_dir=args.output_dir,
-        base_url=BASE_URL
+        base_url=BASE_URL,
+        primary_party=args.primary
     )
 
     output_path = os.path.join(args.output_dir, args.output_csv)
