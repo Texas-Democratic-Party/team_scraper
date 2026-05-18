@@ -120,7 +120,7 @@ def get_available_dates(driver, wait):
         try:
             # Parse the date string (format: MM/DD/YYYY)
             date_obj = datetime.strptime(date_str, '%m/%d/%Y').date()
-            if date_obj <= yesterday:
+            if date_obj <= today:
                 filtered_dates.append(date_str)
             else:
                 logger.debug(f"Skipping future date: {date_str}")
@@ -128,7 +128,7 @@ def get_available_dates(driver, wait):
             logger.warning(f"Could not parse date: {date_str}, skipping")
             continue
 
-    logger.info(f"Found {len(dates)} total dates, {len(filtered_dates)} dates up to yesterday ({yesterday.strftime('%m/%d/%Y')})")
+    logger.info(f"Found {len(dates)} total dates, {len(filtered_dates)} dates up to today ({today.strftime('%m/%d/%Y')})")
     logger.info(f"Dates to process: {filtered_dates}")
 
     # Close the dropdown without selecting anything by pressing Escape
