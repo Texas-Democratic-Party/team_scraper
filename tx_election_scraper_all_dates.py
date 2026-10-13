@@ -145,7 +145,7 @@ def select_date(driver, wait, target_date):
     date_dropdown = None
     try:
         date_dropdown = wait.until(
-            EC.element_to_be_clickable((By.CSS_SELECTOR, "mat-select[formcontrolname='VotingByDate']"))
+            EC.element_to_be_clickable((By.CSS_SELECTOR, "mat-select[formcontrolname='votingByDate']"))
         )
     except TimeoutException:
         date_dropdown = wait.until(
