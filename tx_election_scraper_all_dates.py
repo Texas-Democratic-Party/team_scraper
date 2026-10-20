@@ -272,7 +272,7 @@ def scrape_all_dates(election_name, csv_dl_dir, base_url, primary_party=None):
             os.remove(fpath)
 
     driver = init_driver(local_download_path=csv_dl_dir)
-    wait = WebDriverWait(driver, 20)
+    wait = WebDriverWait(driver, 60)
 
     try:
         # Step 1: Load page, select election, and read the available dates
