@@ -120,7 +120,7 @@ def get_available_dates(driver, wait):
         try:
             # Parse the date string (format: MM/DD/YYYY)
             date_obj = datetime.strptime(date_str, '%m/%d/%Y').date()
-            if date_obj == yesterday:
+            if datetime(2026, 10, 19).date() <= date_obj <= yesterday:
                 filtered_dates.append(date_str)
             else:
                 logger.debug(f"Skipping future date: {date_str}")
