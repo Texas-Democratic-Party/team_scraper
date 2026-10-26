@@ -115,14 +115,14 @@ def get_available_dates(driver, wait):
     today = datetime.now().date()
     yesterday = today - timedelta(days=1)
     two_days_ago = today - timedelta(days=2)
-    first_day_ev = datetime(2026, 10, 19)
+    first_day_ev = datetime(2026, 10, 19).date()
     
     filtered_dates = []
     for date_str in dates:
         try:
             # Parse the date string (format: MM/DD/YYYY)
             date_obj = datetime.strptime(date_str, '%m/%d/%Y').date()
-            if two_days_ago <= date_obj <= yesterday:
+            if first_day_ev <= date_obj <= yesterday:
                 filtered_dates.append(date_str)
             else:
                 logger.debug(f"Skipping future date: {date_str}")
